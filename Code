@@ -1,0 +1,239 @@
+#include <Wire.h>
+#include <RTClib.h>
+#include <LiquidCrystal.h>
+#include <Servo.h>
+
+// Hardware configuration
+#define SERVO_PIN 6
+#define BUTTON_PIN 2
+#define LED_PIN 3
+#define BUZZER_PIN 4
+
+// LCD pin configuration (16x2)
+const int rs = 7, en = 8, d4 = 9, d5 = 10, d6 = 11, d7 = 12;
+LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
+
+// RTC
+RTC_DS3231 rtc;
+
+// Servo
+Servo dispenserServo;
+
+// Time interval (default 20 sec)
+unsigned long intervalMillis = 20000;
+unsigned long lastDispenseTime = 0;
+
+// Alert
+bool alertActive = false;
+unsigned long lastAlertTime = 0;
+const unsigned long alertInterval = 500;
+
+// LCD blink
+bool lcdVisible = true;
+unsigned long lastLcdBlinkTime = 0;
+const unsigned long lcdBlinkInterval = 500;
+
+// Compartment
+int currentAngle = 0;   // Servo angle
+const int stepAngle = 30; // Rotate 30° each time
+const int maxCompartments = 6; // 180° / 30° = 6 compartments
+
+void setup() {
+  Serial.begin(9600);
+  Serial.println("Pill Dispenser Starting...");
+  Serial.println("Commands:");
+  Serial.println("  - '20s', '5m', '2h' for intervals");
+  Serial.println("  - 'comp:X' to set compartment (0-5)");
+
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+
+  lcd.begin(16, 2);
+  lcd.print("System Start");
+
+  // Servo starts at 0° on startup
+  dispenserServo.attach(SERVO_PIN);
+  currentAngle = 0;
+  dispenserServo.write(currentAngle);
+
+  delay(2000);
+
+  Wire.begin();
+  if (!rtc.begin()) {
+    Serial.println("RTC not found!");
+    lcd.clear();
+    lcd.print("RTC Error!");
+    while (1);
+  }
+
+  if (rtc.lostPower()) {
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  }
+
+  lcd.clear();
+  lcd.print("System Ready!");
+  delay(2000);
+
+  lastDispenseTime = millis();
+  updateLCD();
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+
+  // Read button to stop alert
+  bool buttonPressed = (digitalRead(BUTTON_PIN) == LOW);
+
+  // Serial input to change interval or compartment
+  if (Serial.available()) {
+    String input = Serial.readStringUntil('\n');
+    input.trim();
+    processSerialInput(input);
+  }
+
+  // Check if it's time to activate alert
+  if ((currentMillis - lastDispenseTime) >= intervalMillis && !alertActive) {
+    alertActive = true;
+    lastAlertTime = millis();
+    Serial.println("ALERT! Take Medication!");
+  }
+
+  // Handle alert (continuous until button press)
+  if (alertActive) {
+    handleAlert();
+    blinkLCD();
+    
+    // Check for button press to stop alert and dispense
+    if (buttonPressed) {
+      // Rotate servo 30°
+      currentAngle += stepAngle;
+      if (currentAngle >= 180) currentAngle = 0;
+      dispenserServo.write(currentAngle);
+      Serial.print("Servo rotated to: ");
+      Serial.print(currentAngle);
+      Serial.print("° (Compartment ");
+      Serial.print(currentAngle / stepAngle);
+      Serial.println(")");
+      
+      // Reset timer and deactivate alert
+      lastDispenseTime = currentMillis;
+      deactivateAlert();
+      updateLCD();
+      delay(300); // debounce
+    }
+  }
+
+  // Update LCD if not in alert mode
+  if (!alertActive) {
+    updateLCD();
+  }
+
+  delay(50);
+}
+
+void processSerialInput(String input) {
+  input.toLowerCase();
+  
+  if (input.endsWith("m")) { // minutes
+    int mins = input.toInt();
+    intervalMillis = mins * 60UL * 1000UL;
+    Serial.print("Interval set to ");
+    Serial.print(mins);
+    Serial.println(" minutes");
+  } else if (input.endsWith("h")) { // hours
+    int hours = input.toInt();
+    intervalMillis = hours * 60UL * 60UL * 1000UL;
+    Serial.print("Interval set to ");
+    Serial.print(hours);
+    Serial.println(" hours");
+  } else if (input.endsWith("s")) { // seconds
+    int secs = input.toInt();
+    intervalMillis = secs * 1000UL;
+    Serial.print("Interval set to ");
+    Serial.print(secs);
+    Serial.println(" seconds");
+  } else if (input.startsWith("comp:")) { // set compartment
+    int comp = input.substring(5).toInt();
+    if (comp >= 0 && comp < maxCompartments) {
+      currentAngle = comp * stepAngle;
+      dispenserServo.write(currentAngle);
+      Serial.print("Compartment set to: ");
+      Serial.println(comp);
+    } else {
+      Serial.print("Invalid compartment. Use 0-");
+      Serial.println(maxCompartments - 1);
+    }
+  } else {
+    // Default to seconds if no unit specified
+    int value = input.toInt();
+    if (value > 0) {
+      intervalMillis = value * 1000UL;
+      Serial.print("Interval set to ");
+      Serial.print(value);
+      Serial.println(" seconds");
+    }
+  }
+  
+  // Update display after changing settings
+  updateLCD();
+}
+
+void handleAlert() {
+  unsigned long currentTime = millis();
+  if (currentTime - lastAlertTime >= alertInterval) {
+    digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+    digitalWrite(BUZZER_PIN, !digitalRead(BUZZER_PIN));
+    lastAlertTime = currentTime;
+  }
+}
+
+void deactivateAlert() {
+  alertActive = false;
+  digitalWrite(LED_PIN, LOW);
+  digitalWrite(BUZZER_PIN, LOW);
+  lcdVisible = true;
+  Serial.println("Alert stopped");
+}
+
+void blinkLCD() {
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastLcdBlinkTime >= lcdBlinkInterval) {
+    lcdVisible = !lcdVisible;
+    lastLcdBlinkTime = currentMillis;
+  }
+
+  if (alertActive) {
+    lcd.clear();
+    if (lcdVisible) {
+      lcd.setCursor(0, 0);
+      lcd.print("!!! TAKE MEDS !!!");
+      lcd.setCursor(0, 1);
+      lcd.print("Press button");
+    }
+  }
+}
+
+void updateLCD() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Comp:");
+  lcd.print(currentAngle / stepAngle);
+  lcd.print("/");
+  lcd.print(maxCompartments - 1);
+  
+  lcd.setCursor(0, 1);
+  unsigned long timeLeft = (intervalMillis - (millis() - lastDispenseTime)) / 1000;
+  lcd.print("Next:");
+  
+  if (timeLeft > 3600) {
+    lcd.print(timeLeft / 3600);
+    lcd.print("h");
+  } else if (timeLeft > 60) {
+    lcd.print(timeLeft / 60);
+    lcd.print("m");
+  } else {
+    lcd.print(timeLeft);
+    lcd.print("s");
+  }
+}
