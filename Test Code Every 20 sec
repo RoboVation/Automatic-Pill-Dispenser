@@ -1,0 +1,130 @@
+#include <Wire.h>
+#include <RTClib.h>
+#include <LiquidCrystal.h>
+#include <Servo.h>
+
+// Hardware configuration
+#define SERVO_PIN 6
+#define BUTTON_PIN 2
+#define LED_PIN 3
+#define BUZZER_PIN 4
+
+// LCD pin configuration (standard 16x2 LCD)
+const int rs = 7, en = 8, d4 = 9, d5 = 10, d6 = 11, d7 = 12;
+LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
+
+// Initialize RTC
+RTC_DS3231 rtc;
+
+// Initialize servo
+Servo dispenserServo;
+
+// Interval changed to 20 seconds
+const int medicationIntervalSeconds = 20;
+unsigned long lastDispenseTime = 0;
+
+bool alertActive = false;
+unsigned long lastAlertTime = 0;
+const unsigned long alertInterval = 500;
+
+int currentCompartment = 0;
+const int totalCompartments = 8;
+int currentAngle = 0;
+const int stepAngle = 30; // Rotate 30 degrees each time
+
+void setup() {
+  Serial.begin(9600);
+  Serial.println("Pill Dispenser (20-sec Interval)");
+
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+
+  lcd.begin(16, 2);
+  lcd.print("System Start");
+  delay(2000);
+
+  Wire.begin();
+  if (!rtc.begin()) {
+    Serial.println("ERROR: Couldn't find RTC!");
+    lcd.clear();
+    lcd.print("RTC Error!");
+    while (1);
+  }
+
+  if (rtc.lostPower()) {
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  }
+
+  dispenserServo.attach(SERVO_PIN);
+  dispenserServo.write(currentAngle);
+
+  lcd.clear();
+  lcd.print("System Ready!");
+  delay(2000);
+
+  lastDispenseTime = millis(); // start timer
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+  bool buttonPressed = (digitalRead(BUTTON_PIN) == LOW);
+
+  // Every 20 seconds, rotate servo and activate alarm
+  if ((currentMillis - lastDispenseTime) >= (medicationIntervalSeconds * 1000UL)) {
+    Serial.println("20 seconds elapsed - Rotating servo 30°...");
+
+    // Activate alarm
+    alertActive = true;
+    lastAlertTime = currentMillis;
+
+    // Rotate servo
+    currentAngle += stepAngle;
+    if (currentAngle > 180) currentAngle = currentAngle - 180; // keep within 0-180
+    dispenserServo.write(currentAngle);
+
+    // Move to next compartment
+    currentCompartment = (currentCompartment + 1) % totalCompartments;
+    Serial.print("Compartment: ");
+    Serial.println(currentCompartment + 1);
+
+    lastDispenseTime = currentMillis;
+  }
+
+  // If alarm is active, toggle LED & buzzer
+  if (alertActive) {
+    if (currentMillis - lastAlertTime >= alertInterval) {
+      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+      digitalWrite(BUZZER_PIN, !digitalRead(BUZZER_PIN));
+      lastAlertTime = currentMillis;
+    }
+  }
+
+  // Stop alarm if button pressed
+  if (buttonPressed && alertActive) {
+    Serial.println("Button pressed - Alarm off");
+    alertActive = false;
+    digitalWrite(LED_PIN, LOW);
+    digitalWrite(BUZZER_PIN, LOW);
+    delay(300); // debounce
+  }
+
+  updateDisplay();
+  delay(100);
+}
+
+void updateDisplay() {
+  lcd.setCursor(0, 0);
+  lcd.print("Comp: ");
+  lcd.print(currentCompartment + 1);
+  lcd.print("/");
+  lcd.print(totalCompartments);
+  lcd.print("      ");
+
+  lcd.setCursor(0, 1);
+  unsigned long timeLeft = (medicationIntervalSeconds * 1000UL) - (millis() - lastDispenseTime);
+  if (timeLeft > 0) lcd.print("Next: ");
+  else lcd.print("Next: 0");
+  lcd.print(timeLeft / 1000);
+  lcd.print("s     ");
+}
